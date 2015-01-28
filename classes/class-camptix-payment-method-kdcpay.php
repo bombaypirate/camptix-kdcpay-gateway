@@ -242,6 +242,8 @@ class CampTix_Payment_Method_KDCpay extends CampTix_Payment_Method {
 		);
 		if ( $this->options['sandbox'] ) {
 			$payload['mode'] = '0';
+		} else {
+			$payload['mode'] = '1';
 		}
 
  		$checkFieldsA=array('mid','orderId','returnUrl','buyerEmail','buyerName','buyerAddress','buyerAddress2','buyerCity','buyerState','buyerCountry','buyerPincode','buyerDialCode','buyerPhoneNumber','txnType','payOption','mode','currency','totalAmount','ipAddress','purpose','productDescription','productAmount','productQuantity','productTwoDescription','productTwoAmount','productTwoQuantity','productThreeDescription','productThreeAmount','productThreeQuantity','productFourDescription','productFourAmount','productFourQuantity','productFiveDescription','productFiveAmount','productFiveQuantity','txnDate','payby');
