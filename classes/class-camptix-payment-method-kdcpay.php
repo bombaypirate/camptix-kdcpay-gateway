@@ -105,105 +105,91 @@ class CampTix_Payment_Method_KDCpay extends CampTix_Payment_Method {
 
 		$attendee = reset( $attendees );
 
-		if ( 'draft' == $attendee->post_status ) {
-			return $this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING );
-		} else {
 			$access_token = get_post_meta( $attendee->ID, 'tix_access_token', true );
 			$url = add_query_arg( array(
 				'tix_action' => 'access_tickets',
 				'tix_access_token' => $access_token,
 			), $camptix->get_tickets_url() );
 
+			/*** KDCpay_notify***/
+			$secretKey = $this->options['merchant_key'];
+			$this->log( sprintf( 'Running payment_notify. Request data attached.' ), null, $_REQUEST );
+			$this->log( sprintf( 'Running payment_notify. Server data attached.' ), null, $_SERVER );
+			$payment_token = ( isset( $_REQUEST['tix_payment_token'] ) ) ? trim( $_REQUEST['tix_payment_token'] ) : '';
+			$payload = stripslashes_deep( $_POST );
+			$hash = $_POST["checksum"];
+			$status = $_POST['status'];
+			#KDCpay Response Checksum part
+			$checksumAllowA=array('status','orderId','responseCode','responseDescription','amount','trackId','pgId','bankId','paidBy');
+			$checkAll = '';
+			foreach($_POST as $k=>$v){
+			  if(in_array($k,$checksumAllowA)){
+				$checkAll.="'".$v."'";
+			  }
+			}
+			$checkhash = hash_hmac('sha256',$checkAll,$secretKey);
+			$transauthorised = false;
+
+			if($hash == $checkhash){
+				$status = strtolower($status);
+				if($status=="success"){
+					$this->log( 'SUCCESS Txn. paidBy='.$payload['paidBy'].' | trackId='. $payload['trackId'].' | TPSL='.$payload['pgId'].' | BankId='.$payload['bankId'] );
+					$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_COMPLETED );
+				}else if($status=="pending"){
+					$this->log( 'PENDING Txn. trackId='. $payload['trackId'].' |  TPSL='.$payload['pgId'].' | BankId='.$payload['bankId'] );
+					$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING );
+				}else if($status=="fail"){
+					$this->log( 'FAILED Txn. Error='.$payload['responseCode'].' | Description='.$payload['responseDescription'].' | trackId='. $payload['trackId'].' |  TPSL='.$payload['pgId'].' | BankId='.$payload['bankId'] );
+					$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_FAILED );
+				}
+			}else{
+				$this->log( sprintf( 'CheckSum failed: %s', $payload ) );
+				//$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING );
+			}
+			/***/
 			wp_safe_redirect( esc_url_raw( $url . '#tix' ) );
 			die();
-		}
-	}
 
-	function validate_response_data( $data ) {
-		$url = 'https://kdcpay.com/api/validate.php';
-
-		$response = wp_remote_post( $url, array(
-			'method' => 'POST',
-			'body' => $data,
-			'timeout' => 70,
-			'sslverify' => true,
-			'user-agent' => 'WordCamp-CampTix-Plugin'
-		) );
-
-		if ( is_wp_error( $response ) ) {
-			$this->log( sprintf( 'There was a problem connecting to the payment gateway. Response data attached.' ), null, $response );
-			return false;
-		}
-
-		if ( empty( $response['body'] ) ) {
-			$this->log( sprintf( 'Empty KDCpay response. Response data attached.' ), null, $response );
-			return false;
-		}
-
-		parse_str( $response['body'], $parsed_response );
-
-		$response = $parsed_response;
-
-		// Interpret Response
-		if ( is_array( $response ) && in_array( 'VALID', array_keys( $response ) ) ) {
-			return true;
-		} else {
-			return false;
-		}
 	}
 
 	/**
 	 * Runs when KDCpay sends an ITN signal.
 	 * Verify the payload and use $this->payment_result
 	 * to signal a transaction result back to CampTix.
-	 */
+	 *
 	function payment_notify() {
 		global $camptix;
-
+		$secretKey = $this->options['merchant_key'];
 		$this->log( sprintf( 'Running payment_notify. Request data attached.' ), null, $_REQUEST );
 		$this->log( sprintf( 'Running payment_notify. Server data attached.' ), null, $_SERVER );
-
 		$payment_token = ( isset( $_REQUEST['tix_payment_token'] ) ) ? trim( $_REQUEST['tix_payment_token'] ) : '';
-
 		$payload = stripslashes_deep( $_POST );
-
-		$data_string = '';
-		$data_array = array();
-
-		// Dump the submitted variables and calculate security signature
-		foreach ( $payload as $key => $val ) {
-			if ( $key != 'signature' ) {
-				$data_string .= $key .'='. urlencode( $val ) .'&';
-				$data_array[$key] = $val;
-			}
+		$hash = $_POST["checksum"];
+		$status = $_POST['status'];
+		#KDCpay Response Checksum part
+		$checkAll = '';
+		foreach($_POST as $k=>$v){
+		  if($k!='checksum'){
+			$checkAll.="'".$v."'";
+		  }
 		}
-		$data_string = substr( $data_string, 0, -1 );
-		$signature = md5( $data_string );
-
-		$pfError = false;
-		if ( 0 != strcmp( $signature, $payload['signature'] ) ) {
-			$pfError = true;
-			$this->log( sprintf( 'ITN request failed, signature mismatch: %s', $payload ) );
-		}
-
-		// Verify IPN came from KDCpay
-		if ( ! $pfError && $this->validate_response_data( $data_array ) ) {
-			switch ( $payload['payment_status'] ) {
-				case "COMPLETE" :
-					$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_COMPLETED );
-					break;
-				case "FAILED" :
-					$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_FAILED );
-					break;
-				case "PENDING" :
-					$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING );
-					break;
+		$checkhash = hash_hmac('sha256',$checkAll,$secretKey);
+		$transauthorised = false;
+		if($hash == $checkhash){
+			$status = strtolower($status);
+			if($status=="success"){
+				$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_COMPLETED );
+			}else if($status=="pending"){
+				$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING );
+			}else if($status=="fail"){
+				$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_FAILED );
 			}
-		} else {
+		}else{
+			$this->log( sprintf( 'CheckSum failed: %s', $payload ) );
 			$this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING );
 		}
 	}
-
+	*/
 	public function payment_checkout( $payment_token ) {
 
 		if ( ! $payment_token || empty( $payment_token ) )
@@ -217,82 +203,62 @@ class CampTix_Payment_Method_KDCpay extends CampTix_Payment_Method {
 			'tix_payment_token' => $payment_token,
 			'tix_payment_method' => 'camptix_kdcpay',
 		), $this->get_tickets_url() );
-
-		/*
 		$cancel_url = add_query_arg( array(
 			'tix_action' => 'payment_cancel',
 			'tix_payment_token' => $payment_token,
 			'tix_payment_method' => 'camptix_kdcpay',
 		), $this->get_tickets_url() );
-
 		$notify_url = add_query_arg( array(
 			'tix_action' => 'payment_notify',
 			'tix_payment_token' => $payment_token,
 			'tix_payment_method' => 'camptix_kdcpay',
 		), $this->get_tickets_url() );
-		*/
 		$order = $this->get_order( $payment_token );
 		
 		$mid = $this->options['merchant_id'];
-		$secretkey = $this->options['merchant_key'];
-		$orderId = substr($payment_token,0,20);
+		$secretKey = $this->options['merchant_key'];
+		$orderId = (strlen($payment_token)>=21)?substr($payment_token,0,18).'_X':$payment_token;
 		$total = $order['total'];
-		/*** Only require if 'payOption' is set to '3';
-		$buyerEmail = 'email@domain.ext';
-		$buyerName = $this->camptix_options['event_name'];
-		$buyerAddress = 'Address';
-		$buyerCity = 'City';
-		$buyerState = 'Maharashtra';
-		$buyerCountry = 'India';
-		$buyerPincode = '123456';
-		$buyerPhoneNumber = '1234567890';
-		***/
+		$event_name = ($this->camptix_options['event_name']!="")?$this->camptix_options['event_name']:get_bloginfo( 'name' );
 
 		$payload = array(
 			// Merchant details
 			'mid' => $mid,
 			'orderId' => $orderId,
-			'returnUrl' => $return_url,
-			/*** Only require if 'payOption' is set to '3';
-			// Attendee Info
-			'buyerEmail' => $buyerEmail;
-			'buyerName' => $buyerName;
-			'buyerAddress' => $buyerAddress;
-			'buyerCity' => $buyerCity;
-			'buyerState' => $buyerState;
-			'buyerCountry' => $buyerCountry;
-			'buyerPincode' => $buyerPincode;
-			'buyerPhoneNumber' => $buyerPhoneNumber;
-			***/
+			'returnUrl' => $return_url, 
 			'txnType' => '3',
 			'payOption' => '2',
 			'currency' => $this->camptix_options['currency'],
 			'totalAmount' => $total,
 			'ipAddress' => $_SERVER['REMOTE_ADDR'],
 			'purpose' => '3',
-			'productDescription' => get_bloginfo( 'name' ) .' purchase, Order ' . $payment_token,
+			'productDescription' => $event_name . ', Order ' . $payment_token,
 			'productAmount' => $total,
 			'productQuantity' => '1',
-			'txnDate' => date('Y-m-d',time()+19800)//, // Date as IST
-			//'udf1' => $payment_token
+			'txnDate' => date('Y-m-d',time()+19800), // Date as IST
+			'udf1' => $payment_token,
+			'udf2' => $notify_url,
+			'callBack' => '1'
 		);
 		if ( $this->options['sandbox'] ) {
 			$payload['mode'] = '0';
 		}
-		
+
+ 		$checkFieldsA=array('mid','orderId','returnUrl','buyerEmail','buyerName','buyerAddress','buyerAddress2','buyerCity','buyerState','buyerCountry','buyerPincode','buyerDialCode','buyerPhoneNumber','txnType','payOption','mode','currency','totalAmount','ipAddress','purpose','productDescription','productAmount','productQuantity','productTwoDescription','productTwoAmount','productTwoQuantity','productThreeDescription','productThreeAmount','productThreeQuantity','productFourDescription','productFourAmount','productFourQuantity','productFiveDescription','productFiveAmount','productFiveQuantity','txnDate','payby');
 		$all = '';
 		foreach($payload as $k=>$v){
-		 if($k!='checksum'||$k!='udf1'||$k!='udf2'||$k!='udf3'){$all.="'";
-		  if($k=='returnUrl'){$all.=sanitizedURL($v);} 
-		  else{$all.=sanitizedParam($v);}
-		  $all.="'";
+		 if(in_array($k,$checkFieldsA)){
+		   $all.="'";
+			if($k=='returnUrl'){$all.=sanitizedURL($v);}
+			else{$all.=sanitizedParam($v);}
+		   $all.="'";
 		 }
 		}
-		$payload['checksum'] = hash_hmac('sha256', $all, $secretkey); //calculateChecksum($secretKey,$all);
+		$payload['checksum'] = calculateChecksum($secretKey,$all);
 	
 		$kdcpay_args_array = array();
 		foreach ( $payload as $key => $value ) {
-			$kdcpay_args_array[] = '<input type="hidden" name="' . esc_attr( $key ) . '" value="' . esc_attr( $value ) . '" />';
+			$kdcpay_args_array[] = '<input type="hidden" name="' . esc_attr( $key ) . '" value="' . esc_attr( $value ) . '" readonly="readonly" />';
 		}
 
 		echo '<div id="tix">
@@ -325,28 +291,25 @@ class CampTix_Payment_Method_KDCpay extends CampTix_Payment_Method {
 	}
 	
 }
-
-
-		// KDCpay custom functions
-		function sanitizedParam( $param ){
-			$pattern[0]="%,%";$pattern[1]="%#%";$pattern[2]="%\(%";$pattern[3]="%\)%";$pattern[4]="%\{%";$pattern[5]="%\}%";
-			$pattern[6]="%<%";$pattern[7]="%>%";$pattern[8]="%`%";$pattern[9]="%!%";$pattern[10]="%\\$%";$pattern[11]="%\%%";
-			$pattern[12]="%\^%";$pattern[13]="%=%";$pattern[14]="%\+%";$pattern[15]="%\|%";$pattern[16]="%\\\%";$pattern[17]="%:%";
-			$pattern[18]="%'%";$pattern[19]="%\"%";$pattern[20]="%;%";$pattern[21]="%~%";$pattern[22]="%\[%";$pattern[23]="%\]%";
-			$pattern[24]="%\*%";$pattern[25]="%&%";
-			$sanitizedParam=preg_replace($pattern,"",$param);
-			return $sanitizedParam;
-		}
-		function sanitizedURL( $param ){
-			$pattern[0]="%,%";$pattern[1]="%\(%";$pattern[2]="%\)%";$pattern[3]="%\{%";$pattern[4]="%\}%";$pattern[5]="%<%";
-			$pattern[6]="%>%";$pattern[7]="%`%";$pattern[8]="%!%";$pattern[9]="%\\$%";$pattern[10]="%\%%";$pattern[11]="%\^%";
-			$pattern[12]="%\+%";$pattern[13]="%\|%";$pattern[14]="%\\\%";$pattern[15]="%'%";$pattern[16]="%\"%";$pattern[17]="%;%";
-			$pattern[18]="%~%";$pattern[19]="%\[%";$pattern[20]="%\]%";$pattern[21]="%\*%";
-			$sanitizedParam=preg_replace($pattern,"",$param);
-			return $sanitizedParam;
-		}
-		function calculateChecksum( $secretkey, $all ) {
-			return hash_hmac('sha256', $all , $secretkey);
-		}
-
+// KDCpay custom functions
+function sanitizedParam( $param ){
+	$pattern[0]="%,%";$pattern[1]="%#%";$pattern[2]="%\(%";$pattern[3]="%\)%";$pattern[4]="%\{%";$pattern[5]="%\}%";
+	$pattern[6]="%<%";$pattern[7]="%>%";$pattern[8]="%`%";$pattern[9]="%!%";$pattern[10]="%\\$%";$pattern[11]="%\%%";
+	$pattern[12]="%\^%";$pattern[13]="%=%";$pattern[14]="%\+%";$pattern[15]="%\|%";$pattern[16]="%\\\%";$pattern[17]="%:%";
+	$pattern[18]="%'%";$pattern[19]="%\"%";$pattern[20]="%;%";$pattern[21]="%~%";$pattern[22]="%\[%";$pattern[23]="%\]%";
+	$pattern[24]="%\*%";$pattern[25]="%&%";
+	$sanitizedParam=preg_replace($pattern,"",$param);
+	return $sanitizedParam;
+}
+function sanitizedURL( $param ){
+	$pattern[0]="%,%";$pattern[1]="%\(%";$pattern[2]="%\)%";$pattern[3]="%\{%";$pattern[4]="%\}%";$pattern[5]="%<%";
+	$pattern[6]="%>%";$pattern[7]="%`%";$pattern[8]="%!%";$pattern[9]="%\\$%";$pattern[10]="%\%%";$pattern[11]="%\^%";
+	$pattern[12]="%\+%";$pattern[13]="%\|%";$pattern[14]="%\\\%";$pattern[15]="%'%";$pattern[16]="%\"%";$pattern[17]="%;%";
+	$pattern[18]="%~%";$pattern[19]="%\[%";$pattern[20]="%\]%";$pattern[21]="%\*%";
+	$sanitizedParam=preg_replace($pattern,"",$param);
+	return $sanitizedParam;
+}
+function calculateChecksum( $secretkey, $all ) {
+	return hash_hmac('sha256',$all,$secretkey);
+}
 ?>
